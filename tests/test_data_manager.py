@@ -110,6 +110,47 @@ class DataManagerTests(unittest.TestCase):
             with self.assertRaises(PersistenceError):
                 manager.save(state)
 
+    def test_failed_save_preserves_previous_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "save.json"
+            manager = DataManager(path)
+            expected = {"version": 1, "hero": {"name": "Ada"}}
+            manager.save(expected)
+
+            with self.assertRaises(PersistenceError):
+                manager.save({"invalid": {1, 2, 3}})
+
+            self.assertEqual(expected, manager.load())
+            self.assertFalse(path.with_name("save.json.tmp").exists())
+
+    def test_load_non_utf8_file_raises_invalid_save(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "save.json"
+            path.write_bytes(b"\xff\xfe\xfa")
+            manager = DataManager(path)
+
+            with self.assertRaises(InvalidSaveError):
+                manager.load()
+
+    def test_load_rejects_isolated_unicode_surrogate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "save.json"
+            path.write_bytes(b'{"name": "\\ud800"}')
+            manager = DataManager(path)
+
+            with self.assertRaises(InvalidSaveError):
+                manager.load()
+
+    def test_unicode_save_failure_removes_temporary_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "save.json"
+            manager = DataManager(path)
+
+            with self.assertRaises(PersistenceError):
+                manager.save({"name": "\ud800"})
+
+            self.assertFalse(path.with_name("save.json.tmp").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,24 +19,33 @@ class DataManager:
         self._path = Path(path)
 
     def exists(self):
-        return self._path.is_file()
+        try:
+            return self._path.is_file()
+        except OSError as exc:
+            raise PersistenceError(
+                "No se pudo consultar la partida guardada."
+            ) from exc
 
     def save(self, state):
         if not isinstance(state, dict):
             raise InvalidSaveError("El estado debe ser un diccionario.")
 
+        temporary_path = self._path.with_name(f"{self._path.name}.tmp")
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-
-            with self._path.open("w", encoding="utf-8") as file:
+            with temporary_path.open("w", encoding="utf-8") as file:
                 json.dump(
                     state,
                     file,
                     ensure_ascii=False,
                     indent=2
                 )
-
-        except (OSError, TypeError) as exc:
+            temporary_path.replace(self._path)
+        except (OSError, TypeError, UnicodeEncodeError) as exc:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             raise PersistenceError(
                 "No se pudo guardar la partida."
             ) from exc
@@ -56,6 +65,11 @@ class DataManager:
                 "El archivo de guardado contiene JSON inválido."
             ) from exc
 
+        except UnicodeDecodeError as exc:
+            raise InvalidSaveError(
+                "El archivo de guardado no utiliza codificación UTF-8 válida."
+            ) from exc
+
         except OSError as exc:
             raise PersistenceError(
                 "No se pudo leer la partida guardada."
@@ -65,5 +79,12 @@ class DataManager:
             raise InvalidSaveError(
                 "El archivo de guardado debe contener un objeto JSON."
             )
+
+        try:
+            json.dumps(data, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise InvalidSaveError(
+                "El archivo contiene texto Unicode no válido."
+            ) from exc
 
         return data

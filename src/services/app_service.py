@@ -4,6 +4,11 @@ from typing import Any, Dict, List, Protocol
 
 from src.domain.exceptions import DomainError, InvalidActionError
 from src.domain.models import Enemy, Hero, Item, Room
+from src.services.data_manager import PersistenceError
+
+
+class ApplicationError(Exception):
+    """Error controlado de coordinación entre servicios."""
 
 
 class DataManagerProtocol(Protocol):
@@ -182,16 +187,22 @@ class GameService:
     def save_game(self) -> List[str]:
         """Delega el guardado al administrador de datos recibido."""
         save = self._require_data_manager_method("save")
-        save(self.export_state())
+        try:
+            save(self.export_state())
+        except PersistenceError as exc:
+            raise ApplicationError(str(exc)) from exc
         return ["Partida guardada correctamente."]
 
     def load_game(self) -> List[str]:
         """Carga un estado y reconstruye los modelos de dominio."""
         exists = self._require_data_manager_method("exists")
-        if not exists():
-            raise InvalidActionError("No existe una partida guardada.")
         load = self._require_data_manager_method("load")
-        return self.restore_state(load())
+        try:
+            if not exists():
+                raise InvalidActionError("No existe una partida guardada.")
+            return self.restore_state(load())
+        except PersistenceError as exc:
+            raise ApplicationError(str(exc)) from exc
 
     @staticmethod
     def _build_rooms() -> List[Room]:
