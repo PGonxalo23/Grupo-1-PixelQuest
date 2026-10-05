@@ -13,7 +13,8 @@ env/
 .coverage
 htmlcov/
 
-data/savegame.json
+data/*.json
+data/*.json.tmp
 *.log
 
 .DS_Store
