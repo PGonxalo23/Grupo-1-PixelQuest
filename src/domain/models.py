@@ -1,46 +1,12 @@
 from typing import List, Optional, Dict, Any
-try:
-    from src.domain.exceptions import (
-        ValidationError,
-        InvalidNameError,
-        InvalidStatError,
-        InvalidItemError,
-        InventoryError
-    )
-    from src.domain.validators import (
-        validate_name,
-        validate_positive_int,
-        validate_non_negative_int,
-        validate_item_type
-    )
-except ImportError:
-    # Respaldos temporales por si el Integrante 2 aún no ha integrado su PR
-    class ValidationError(Exception): pass
-    class InvalidNameError(ValidationError): pass
-    class InvalidStatError(ValidationError): pass
-    class InvalidItemError(ValidationError): pass
-    class InventoryError(ValidationError): pass
 
-    def validate_name(val):
-        if not val or not str(val).strip():
-            raise InvalidNameError("El nombre no puede estar vacío.")
-        return str(val).strip()
-
-    def validate_positive_int(val, field=""):
-        if not isinstance(val, int) or val <= 0:
-            raise InvalidStatError(f"{field} debe ser un entero > 0")
-        return val
-
-    def validate_non_negative_int(val, field=""):
-        if not isinstance(val, int) or val < 0:
-            raise InvalidStatError(f"{field} debe ser un entero >= 0")
-        return val
-
-    def validate_item_type(val):
-        v = str(val).lower().strip()
-        if v not in ("weapon", "armor"):
-            raise InvalidItemError("Tipo de item inválido. Debe ser 'weapon' o 'armor'")
-        return v
+from src.domain.exceptions import (
+    ValidationError, InvalidNameError, InvalidStatError, InvalidItemError, InventoryError
+)
+from src.domain.validators import (
+    validate_name, validate_positive_int, validate_non_negative_int,
+    validate_item_type, validate_color
+)
 
 
 class Item:
@@ -129,12 +95,14 @@ class Character:
 
 
 class Hero(Character):
+    DEFAULT_COLORS = {"warrior": "#59C9A5", "mage": "#A78BFA"}
+
     CLASS_STATS = {
         "warrior": {"max_health": 30, "attack": 7, "defense": 4},
         "mage": {"max_health": 22, "attack": 10, "defense": 2},
     }
 
-    def __init__(self, name: str, hero_class: str):
+    def __init__(self, name: str, hero_class: str, color: Optional[str] = None):
         normalized_class = str(hero_class).lower().strip()
         if normalized_class not in self.CLASS_STATS:
             raise ValidationError(f"Clase de héroe inválida: {hero_class}")
@@ -143,6 +111,9 @@ class Hero(Character):
         super().__init__(name, stats["max_health"], stats["attack"], stats["defense"])
 
         self._hero_class = normalized_class
+        self._color = validate_color(
+            self.DEFAULT_COLORS[normalized_class] if color is None else color
+        )
         self._inventory: List[Item] = []
         self._weapon: Optional[Item] = None
         self._armor: Optional[Item] = None
@@ -150,6 +121,13 @@ class Hero(Character):
     @property
     def hero_class(self) -> str:
         return self._hero_class
+
+    @property
+    def color(self) -> str:
+        return self._color
+
+    def change_color(self, color: str) -> None:
+        self._color = validate_color(color)
 
     @property
     def inventory(self) -> List[Item]:
@@ -192,6 +170,7 @@ class Hero(Character):
         return {
             "name": self._name,
             "hero_class": self._hero_class,
+            "color": self._color,
             "health": self._health,
             "max_health": self._max_health,
             "base_attack": self._base_attack,
@@ -203,7 +182,7 @@ class Hero(Character):
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Hero":
-        hero = cls(data["name"], data["hero_class"])
+        hero = cls(data["name"], data["hero_class"], data.get("color"))
         hero._health = data.get("health", hero._max_health)
         hero._inventory = [Item.from_dict(i) for i in data.get("inventory", [])]
         if data.get("weapon"):

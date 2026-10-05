@@ -6,12 +6,18 @@ Pixel Quest utiliza arquitectura en capas. Las dependencias apuntan hacia el dom
 
 ```mermaid
 flowchart LR
-    MAIN["src/main.py"] --> UI["Interfaz · MenuCLI"]
+    MAIN["src/main.py"] --> UI["Interfaz · GraphicalGame / MenuCLI"]
     MAIN --> APP["Aplicación · GameService"]
     MAIN --> DATA["Persistencia · DataManager"]
     UI --> APP
     APP --> DOMAIN["Dominio · Modelos y reglas"]
     APP --> DATA
+    MAIN --> VIEWDATA["VisualDataManager"]
+    APP --> VIEWDATA
+    VIEWDATA --> DATA
+    VIEWDATA --> WORLD["ExplorationWorld"]
+    UI --> WORLD
+    UI --> ART["pixel_art · Pygame"]
     DATA --> JSON[("data/savegame.json")]
 
     classDef entry fill:#17365d,color:#fff,stroke:#17365d
@@ -27,6 +33,10 @@ Reglas de dependencia:
 - `src/domain` no importa servicios, UI, JSON, `input` ni `print`.
 - `GameService` utiliza modelos y recibe persistencia por inyección.
 - `MenuCLI` utiliza la API pública de `GameService` y captura excepciones controladas; no accede a modelos ni a `DataManager`.
+- `GraphicalGame` usa esa misma API para combatir, recoger, equipar y personalizar. Maneja las animaciones y eventos sin calcular daño ni alterar directamente al héroe.
+- `ExplorationWorld` controla coordenadas, alcance visual y colisiones. No conoce los modelos de combate ni necesita Pygame.
+- `VisualDataManager` implementa el contrato de persistencia e incorpora `view` al JSON; el estado visual se aplica solo después de una restauración válida del dominio.
+- `pixel_art.py` dibuja recursos originales con Pygame. Dominio y Servicios no dependen de ese paquete.
 - `main.py` ensambla las capas sin contener reglas del juego.
 
 ## Diagrama de clases
@@ -54,11 +64,13 @@ classDiagram
 
     class Hero {
         -hero_class: str
+        -color: str
         -inventory: list
         -weapon: Item
         -armor: Item
         +add_item(item)
         +equip_item(index)
+        +change_color(color)
         +to_dict() dict
         +from_dict(data) Hero
     }
@@ -82,7 +94,9 @@ classDiagram
     class GameService {
         -status: str
         -current_room_index: int
-        +start_new_game(name, hero_class)
+        +start_new_game(name, hero_class, color)
+        +change_hero_color(color)
+        +get_hero_classes() dict
         +get_snapshot() dict
         +collect_item()
         +equip_item(index)
@@ -103,6 +117,29 @@ classDiagram
         +run()
     }
 
+    class GraphicalGame {
+        +run()
+        +process_event(event)
+        +update(dt)
+        +render()
+    }
+
+    class ExplorationWorld {
+        -position: tuple
+        -facing: str
+        +move(dx, dy, dt)
+        +can_attack(snapshot) bool
+        +to_dict() dict
+        +restore(data, room_index) bool
+    }
+
+    class VisualDataManager {
+        +save(state)
+        +load() dict
+        +exists() bool
+        +restore_view(snapshot) bool
+    }
+
     Character <|-- Hero
     Character <|-- Enemy
     Hero "1" o-- "*" Item : inventario
@@ -114,6 +151,12 @@ classDiagram
     GameService "1" --> "*" Room
     GameService --> DataManager
     MenuCLI --> GameService
+    GraphicalGame --> GameService
+    GraphicalGame --> ExplorationWorld
+    GraphicalGame --> VisualDataManager
+    GameService --> VisualDataManager : contrato inyectado
+    VisualDataManager --> DataManager
+    VisualDataManager --> ExplorationWorld
 ```
 
 ## Secuencia de una partida
@@ -156,7 +199,40 @@ sequenceDiagram
 | `current_room` | entero | Índice existente dentro de `rooms`. |
 | `hero` | objeto | Incluye nombre, clase, vida, estadísticas, inventario y equipo. |
 | `rooms` | lista no vacía | Cada habitación incluye número, descripción, enemigo, objeto y `is_final`. |
+| `hero.color` | texto opcional | RGB hexadecimal `#RRGGBB`; si falta, usa el color de la clase. |
+| `view` | objeto opcional | Versión visual, índice de sala, posición y orientación. |
 
 La lista debe contener un único jefe final vivo mientras la partida esté en curso. El jefe debe estar en la última habitación. Una victoria requiere al héroe vivo, ubicado en esa habitación, con el jefe derrotado.
 
 `DataManager` valida el contenedor JSON. `GameService` valida el significado del estado y reconstruye los modelos.
+
+La ampliación conserva `version: 1`: color y vista son adiciones compatibles. `VisualDataManager` agrega `view` en una copia del estado sin mutar el original. Una posición fuera de la sala, dentro de una columna o enemigo, no finita o perteneciente a otra habitación se descarta y el héroe vuelve a la entrada. Un color inválido sí invalida el dominio guardado y conserva intacta la partida actual.
+
+## Flujo gráfico de un turno
+
+```mermaid
+sequenceDiagram
+    actor J as Jugador
+    participant G as GraphicalGame
+    participant W as ExplorationWorld
+    participant S as GameService
+    J->>G: WASD / flechas
+    G->>W: move(dirección, dt)
+    W-->>G: Posición limitada por paredes y columnas
+    J->>G: Espacio
+    G->>W: can_attack(snapshot)
+    W-->>G: Enemigo cercano
+    G->>S: attack()
+    S-->>G: Ataque, contraataque y estado del encuentro
+    G->>G: Animar turno; bloquear ataques repetidos
+    G-->>J: Vida, daño flotante y victoria/derrota
+```
+
+## Aislamiento por célula
+
+- **Dominio:** `Hero.color`, `change_color()` y `validate_color()`.
+- **Servicios:** catálogo de clases para la vista y caso de uso `change_hero_color()`.
+- **Interfaz/Integración:** renderizado, exploración, persistencia visual y arranque.
+- **Integrador:** dependencias, documentación y pruebas cruzadas.
+
+La configuración local `.vscode/` y el entorno `.venv/` están excluidos de Git. Los cambios se encuentran en una rama local de funcionalidad; los prompts y evidencias se preparan para la revisión del equipo.

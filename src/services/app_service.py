@@ -52,9 +52,14 @@ class GameService:
         """Expone una copia serializable de la habitación actual."""
         return self._current_room_model().to_dict()
 
-    def start_new_game(self, name: str, hero_class: str) -> List[str]:
+    @staticmethod
+    def get_hero_classes() -> Dict[str, Dict[str, int]]:
+        """Estadísticas de creación para la vista, sin exponer el catálogo mutable."""
+        return {name: dict(stats) for name, stats in Hero.CLASS_STATS.items()}
+
+    def start_new_game(self, name: str, hero_class: str, color: str = None) -> List[str]:
         """Crea un héroe y la mazmorra determinista del MVP."""
-        self._hero = Hero(name, hero_class)
+        self._hero = Hero(name, hero_class, color)
         self._rooms = self._build_rooms()
         self._current_room_index = 0
         self._status = self.STATUS_PLAYING
@@ -62,6 +67,12 @@ class GameService:
             f"Comienza la aventura de {self._hero.name}.",
             self._current_room_model().description,
         ]
+
+    def change_hero_color(self, color: str) -> List[str]:
+        """Personalización cosmética: no modifica estadísticas ni consume turnos."""
+        self._require_game_started()
+        self._hero.change_color(color)
+        return ["Color del héroe actualizado."]
 
     def get_snapshot(self) -> Dict[str, Any]:
         """Devuelve una fotografía serializable sin exponer colecciones internas."""
