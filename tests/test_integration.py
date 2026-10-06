@@ -126,6 +126,16 @@ class MenuCLIIntegrationTests(unittest.TestCase):
         )
         self.assertIn("Partida restaurada correctamente.", self.outputs)
 
+    def test_mage_cli_staff_mana_and_victory(self):
+        inputs = ["1", "Ada", "2", "2", "3", "1", "5", "4", "2", "3", "2",
+                  "5", "4", "1", "4", "4", "0"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cli, service = self.build_cli(inputs, Path(temp_dir) / "save.json")
+            cli.run()
+        self.assertEqual("victory", service.status)
+        self.assertIn("Maná: 85/100", self.outputs)
+        self.assertEqual("staff", service.get_snapshot()["hero"]["weapon"]["weapon_kind"])
+
     def test_game_can_be_saved_and_loaded_entirely_from_cli(self):
         inputs = [
             "1", "Ada", "2",  # Nueva partida como Mago

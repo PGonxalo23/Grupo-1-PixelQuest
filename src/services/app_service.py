@@ -1,6 +1,7 @@
 """Casos de uso y flujo principal de una partida de Pixel Quest."""
 
-from typing import Any, Dict, List, Protocol
+from copy import deepcopy
+from typing import Any, Dict, List, Optional, Protocol
 
 from src.domain.exceptions import DomainError, InvalidActionError
 from src.domain.models import Enemy, Hero, Item, Room
@@ -24,7 +25,7 @@ class DataManagerProtocol(Protocol):
 class GameService:
     """Coordina una partida sin depender de la interfaz ni del sistema de archivos."""
 
-    SAVE_VERSION = 1
+    SAVE_VERSION = 2
     STATUS_NOT_STARTED = "not_started"
     STATUS_PLAYING = "playing"
     STATUS_VICTORY = "victory"
@@ -42,6 +43,8 @@ class GameService:
         self._rooms: List[Room] = []
         self._current_room_index = 0
         self._status = self.STATUS_NOT_STARTED
+        self._pending_fire = {}
+        self._spell_id = 0
 
     @property
     def status(self) -> str:
@@ -57,12 +60,13 @@ class GameService:
         """Estadísticas de creación para la vista, sin exponer el catálogo mutable."""
         return {name: dict(stats) for name, stats in Hero.CLASS_STATS.items()}
 
-    def start_new_game(self, name: str, hero_class: str, color: str = None) -> List[str]:
+    def start_new_game(self, name: str, hero_class: str, color: Optional[str] = None) -> List[str]:
         """Crea un héroe y la mazmorra determinista del MVP."""
         self._hero = Hero(name, hero_class, color)
-        self._rooms = self._build_rooms()
+        self._rooms = self._build_rooms(self._hero.hero_class)
         self._current_room_index = 0
         self._status = self.STATUS_PLAYING
+        self._pending_fire.clear()
         return [
             f"Comienza la aventura de {self._hero.name}.",
             self._current_room_model().description,
@@ -123,30 +127,83 @@ class GameService:
         ]
 
     def attack(self) -> List[str]:
-        """Ejecuta un ataque del héroe y el contraataque del enemigo si sobrevive."""
+        """Adaptador de combate por turnos para la consola, sin geometría gráfica."""
+        self._require_enemy()
+        if self._hero.weapon and self._hero.weapon.weapon_kind == "staff":
+            spell = self.cast_fire()
+            messages = self.resolve_fire(spell)
+        else:
+            messages = self._damage_enemy(self._hero.attack)
+        if self._status == self.STATUS_PLAYING and self._current_room_model().enemy.is_alive:
+            messages.extend(self.enemy_attack())
+        return messages
+
+    def melee_attack(self) -> List[str]:
+        """Ataque de espada sin contraataque automático (interfaz en tiempo real)."""
+        self._require_enemy()
+        if self._hero.weapon is None or self._hero.weapon.weapon_kind != "sword":
+            raise InvalidActionError("Recoge y equipa la espada desde el inventario.")
+        return self._damage_enemy(self._hero.attack)
+
+    def cast_fire(self) -> int:
+        """Consume maná al lanzar y autoriza un único impacto posterior."""
+        self._require_enemy()
+        if self._hero.hero_class != "mage" or self._hero.weapon is None or self._hero.weapon.weapon_kind != "staff":
+            raise InvalidActionError("Recoge y equipa el bastón para lanzar fuego.")
+        self._hero.spend_mana(Hero.FIRE_COST)
+        self._spell_id += 1
+        self._pending_fire[self._spell_id] = (self._current_room_index, self._hero.attack)
+        return self._spell_id
+
+    def resolve_fire(self, spell_id: int) -> List[str]:
+        if type(spell_id) is not int or spell_id not in self._pending_fire:
+            raise InvalidActionError("Este hechizo ya se resolvió o no existe.")
+        room_index, attack = self._pending_fire.pop(spell_id)
+        if room_index != self._current_room_index:
+            raise InvalidActionError("El hechizo pertenece a otra habitación.")
+        self._require_enemy()
+        return self._damage_enemy(attack)
+
+    def cancel_fire(self, spell_id: int) -> None:
+        """Un proyectil fallido consume el maná, pero nunca inflige daño."""
+        self._pending_fire.pop(spell_id, None)
+
+    def _require_enemy(self):
         self._require_playing()
-        room = self._current_room_model()
-        enemy = room.enemy
+        enemy = self._current_room_model().enemy
         if enemy is None:
             raise InvalidActionError("No hay un enemigo en esta habitación.")
         if not enemy.is_alive:
             raise InvalidActionError("El enemigo de esta habitación ya fue derrotado.")
+        return enemy
 
+    def _damage_enemy(self, attack: int) -> List[str]:
+        enemy = self._require_enemy()
+        room = self._current_room_model()
         messages = []
-        damage = enemy.receive_damage(self._hero.attack)
+        damage = enemy.receive_damage(attack)
         messages.append(
             f"{self._hero.name} causa {damage} de daño a {enemy.name}."
         )
 
         if not enemy.is_alive:
             messages.append(f"Derrotaste a {enemy.name}.")
+            if room.drop is not None:
+                room.item, room.drop = room.drop, None
+                messages.append(f"{enemy.name} dejó una {room.item.name.lower()}.")
+            if self._hero.max_mana:
+                self._hero.restore_mana()
+                messages.append("El enemigo derrotado restaura tu maná a 100.")
             if enemy.is_boss and room.is_final:
                 self._status = self.STATUS_VICTORY
                 messages.append("¡Victoria! Derrotaste al guardián final.")
-            return messages
+        return messages
 
+    def enemy_attack(self) -> List[str]:
+        """Daño independiente; la vista decide el contacto y su frecuencia."""
+        enemy = self._require_enemy()
         damage = self._hero.receive_damage(enemy.attack)
-        messages.append(f"{enemy.name} causa {damage} de daño a {self._hero.name}.")
+        messages = [f"{enemy.name} causa {damage} de daño a {self._hero.name}."]
         if not self._hero.is_alive:
             self._status = self.STATUS_DEFEAT
             messages.append("Derrota. Tu héroe ha caído.")
@@ -155,6 +212,7 @@ class GameService:
     def advance(self) -> List[str]:
         """Avanza a la siguiente habitación cuando el encuentro está resuelto."""
         self._require_playing()
+        self._require_no_projectiles()
         enemy = self._current_room_model().enemy
         if enemy is not None and enemy.is_alive:
             raise InvalidActionError(
@@ -180,6 +238,7 @@ class GameService:
     def restore_state(self, data: Dict[str, Any]) -> List[str]:
         """Reconstruye una partida después de validar su estructura básica."""
         try:
+            data = self._migrate_state(data)
             status, room_index, hero_data, rooms_data = self._validate_state_data(data)
             hero = Hero.from_dict(hero_data)
             rooms = [Room.from_dict(room_data) for room_data in rooms_data]
@@ -193,10 +252,12 @@ class GameService:
         self._rooms = rooms
         self._current_room_index = room_index
         self._status = status
+        self._pending_fire.clear()
         return ["Partida restaurada correctamente."]
 
     def save_game(self) -> List[str]:
         """Delega el guardado al administrador de datos recibido."""
+        self._require_no_projectiles()
         save = self._require_data_manager_method("save")
         try:
             save(self.export_state())
@@ -206,6 +267,7 @@ class GameService:
 
     def load_game(self) -> List[str]:
         """Carga un estado y reconstruye los modelos de dominio."""
+        self._require_no_projectiles()
         exists = self._require_data_manager_method("exists")
         load = self._require_data_manager_method("load")
         try:
@@ -216,8 +278,9 @@ class GameService:
             raise ApplicationError(str(exc)) from exc
 
     @staticmethod
-    def _build_rooms() -> List[Room]:
-        sword = Item("Espada", "weapon", attack_bonus=3)
+    def _build_rooms(hero_class="warrior") -> List[Room]:
+        weapon = Item("Bastón de fuego" if hero_class == "mage" else "Espada", "weapon",
+                      attack_bonus=3, weapon_kind="staff" if hero_class == "mage" else "sword")
         armor = Item("Armadura", "armor", defense_bonus=2)
         goblin = Enemy("Goblin", max_health=12, attack=5, defense=1)
         boss = Enemy(
@@ -230,22 +293,61 @@ class GameService:
         return [
             Room(
                 0,
-                "Entrada de la mazmorra",
-                item=sword,
+                "Entrada de la cueva · los restos del caído",
+                item=weapon,
             ),
             Room(
                 1,
-                "Sala del Goblin",
+                "Gruta del Goblin",
                 enemy=goblin,
-                item=armor,
+                drop=armor,
             ),
             Room(
                 2,
-                "Cámara del guardián final",
+                "Profundidades · el guardián de los goblins",
                 enemy=boss,
                 is_final=True,
             ),
         ]
+
+    def _require_no_projectiles(self):
+        if self._pending_fire:
+            raise InvalidActionError("Espera a que termine el proyectil de fuego.")
+
+    @classmethod
+    def _migrate_state(cls, data):
+        """Migra partidas v1 sin volver a otorgar recompensas ya consumidas."""
+        if not isinstance(data, dict):
+            return data
+        result = deepcopy(data)
+        if type(result.get("version")) is not int or result["version"] != 1:
+            return result
+        hero = result.get("hero")
+        if not isinstance(hero, dict) or not isinstance(result.get("rooms"), list):
+            return result
+        mage = hero.get("hero_class") == "mage"
+        hero.setdefault("mana", 100 if mage else 0)
+        hero.setdefault("max_mana", 100 if mage else 0)
+        items = list(hero.get("inventory", [])) if isinstance(hero.get("inventory"), list) else []
+        if hero.get("weapon") is not None:
+            items.append(hero["weapon"])
+        for room in result["rooms"]:
+            if not isinstance(room, dict):
+                continue
+            item, enemy = room.get("item"), room.get("enemy")
+            if isinstance(item, dict):
+                items.append(item)
+                if (item.get("item_type") == "armor" and isinstance(enemy, dict) and
+                        isinstance(enemy.get("health"), int) and enemy["health"] > 0):
+                    room["drop"], room["item"] = item, None
+            room.setdefault("drop", None)
+        for item in items:
+            if isinstance(item, dict) and item.get("item_type") == "weapon":
+                item.setdefault("weapon_kind", "staff" if mage else "sword")
+                if mage and item.get("name") == "Espada":
+                    item["name"] = "Bastón de fuego"
+        result["version"] = cls.SAVE_VERSION
+        return result
 
     def _require_game_started(self) -> None:
         if self._hero is None or not self._rooms:
@@ -339,6 +441,9 @@ class GameService:
         item_data = room_data.get("item")
         if item_data is not None and not isinstance(item_data, dict):
             raise InvalidActionError("Los datos del objeto no son válidos.")
+        drop_data = room_data.get("drop")
+        if drop_data is not None and not isinstance(drop_data, dict):
+            raise InvalidActionError("El botín guardado no es válido.")
 
     @staticmethod
     def _validate_character_health(character_data, label):
@@ -359,6 +464,9 @@ class GameService:
     def _validate_restored_models(cls, status, room_index, hero, rooms):
         if hero.health < 0 or hero.health > hero.max_health:
             raise InvalidActionError("La vida reconstruida del héroe no es válida.")
+        for room in rooms:
+            if room.drop is not None and (room.enemy is None or not room.enemy.is_alive or room.item is not None):
+                raise InvalidActionError("El botín pendiente no coincide con el enemigo guardado.")
         current_room = rooms[room_index]
         final_bosses = [
             (index, room.enemy)

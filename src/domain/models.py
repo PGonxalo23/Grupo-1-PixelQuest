@@ -10,11 +10,19 @@ from src.domain.validators import (
 
 
 class Item:
-    def __init__(self, name: str, item_type: str, attack_bonus: int = 0, defense_bonus: int = 0):
+    def __init__(self, name: str, item_type: str, attack_bonus: int = 0, defense_bonus: int = 0,
+                 weapon_kind: Optional[str] = None):
         self._name = validate_name(name)
         self._item_type = validate_item_type(item_type)
         self._attack_bonus = validate_non_negative_int(attack_bonus, "attack_bonus")
         self._defense_bonus = validate_non_negative_int(defense_bonus, "defense_bonus")
+        self._weapon_kind = weapon_kind
+        if self._item_type == "weapon":
+            self._weapon_kind = weapon_kind if weapon_kind is not None else "sword"
+            if self._weapon_kind not in ("sword", "staff"):
+                raise InvalidItemError("El arma debe ser una espada o un bastón.")
+        elif weapon_kind is not None:
+            raise InvalidItemError("Una armadura no puede tener un tipo de arma.")
 
         # Regla: Un arma no aporta defensa y una armadura no aporta ataque
         if self._item_type == "weapon":
@@ -38,12 +46,17 @@ class Item:
     def defense_bonus(self) -> int:
         return self._defense_bonus
 
+    @property
+    def weapon_kind(self) -> Optional[str]:
+        return self._weapon_kind
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self._name,
             "item_type": self._item_type,
             "attack_bonus": self._attack_bonus,
-            "defense_bonus": self._defense_bonus
+            "defense_bonus": self._defense_bonus,
+            "weapon_kind": self._weapon_kind,
         }
 
     @classmethod
@@ -52,7 +65,8 @@ class Item:
             name=data["name"],
             item_type=data["item_type"],
             attack_bonus=data.get("attack_bonus", 0),
-            defense_bonus=data.get("defense_bonus", 0)
+            defense_bonus=data.get("defense_bonus", 0),
+            weapon_kind=data.get("weapon_kind"),
         )
 
 
@@ -96,6 +110,7 @@ class Character:
 
 class Hero(Character):
     DEFAULT_COLORS = {"warrior": "#59C9A5", "mage": "#A78BFA"}
+    FIRE_COST = 15
 
     CLASS_STATS = {
         "warrior": {"max_health": 30, "attack": 7, "defense": 4},
@@ -117,6 +132,8 @@ class Hero(Character):
         self._inventory: List[Item] = []
         self._weapon: Optional[Item] = None
         self._armor: Optional[Item] = None
+        self._max_mana = 100 if normalized_class == "mage" else 0
+        self._mana = self._max_mana
 
     @property
     def hero_class(self) -> str:
@@ -128,6 +145,23 @@ class Hero(Character):
 
     def change_color(self, color: str) -> None:
         self._color = validate_color(color)
+
+    @property
+    def mana(self) -> int:
+        return self._mana
+
+    @property
+    def max_mana(self) -> int:
+        return self._max_mana
+
+    def spend_mana(self, amount: int) -> None:
+        validate_positive_int(amount, "mana_cost")
+        if amount > self._mana:
+            raise ValidationError("Maná insuficiente: el hechizo de fuego requiere 15.")
+        self._mana -= amount
+
+    def restore_mana(self) -> None:
+        self._mana = self._max_mana
 
     @property
     def inventory(self) -> List[Item]:
@@ -173,6 +207,8 @@ class Hero(Character):
             "color": self._color,
             "health": self._health,
             "max_health": self._max_health,
+            "mana": self._mana,
+            "max_mana": self._max_mana,
             "base_attack": self._base_attack,
             "base_defense": self._base_defense,
             "inventory": [item.to_dict() for item in self._inventory],
@@ -184,6 +220,11 @@ class Hero(Character):
     def from_dict(cls, data: Dict[str, Any]) -> "Hero":
         hero = cls(data["name"], data["hero_class"], data.get("color"))
         hero._health = data.get("health", hero._max_health)
+        mana = validate_non_negative_int(data.get("mana", hero.max_mana), "mana")
+        max_mana = validate_non_negative_int(data.get("max_mana", hero.max_mana), "max_mana")
+        if max_mana != hero.max_mana or mana > max_mana:
+            raise ValidationError("El maná guardado no coincide con la clase del héroe.")
+        hero._mana = mana
         hero._inventory = [Item.from_dict(i) for i in data.get("inventory", [])]
         if data.get("weapon"):
             hero._weapon = Item.from_dict(data["weapon"])
@@ -225,12 +266,14 @@ class Enemy(Character):
 
 
 class Room:
-    def __init__(self, number: int, description: str, enemy: Optional[Enemy] = None, item: Optional[Item] = None, is_final: bool = False):
+    def __init__(self, number: int, description: str, enemy: Optional[Enemy] = None,
+                 item: Optional[Item] = None, is_final: bool = False, drop: Optional[Item] = None):
         self._number = validate_non_negative_int(number, "number")
         self._description = description
         self.enemy = enemy
         self.item = item
         self._is_final = is_final
+        self.drop = drop
 
     @property
     def number(self) -> int:
@@ -250,6 +293,7 @@ class Room:
             "description": self._description,
             "enemy": self.enemy.to_dict() if self.enemy else None,
             "item": self.item.to_dict() if self.item else None,
+            "drop": self.drop.to_dict() if self.drop else None,
             "is_final": self._is_final
         }
 
@@ -262,5 +306,6 @@ class Room:
             description=data["description"],
             enemy=enemy,
             item=item,
-            is_final=data.get("is_final", False)
+            is_final=data.get("is_final", False),
+            drop=Item.from_dict(data["drop"]) if data.get("drop") else None,
         )

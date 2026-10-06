@@ -172,7 +172,7 @@ class GameServiceTests(unittest.TestCase):
 
         self.assertEqual("Ada", current_snapshot["hero"]["name"])
         self.assertEqual(
-            "Entrada de la mazmorra",
+            "Entrada de la cueva · los restos del caído",
             current_snapshot["room"]["description"],
         )
 

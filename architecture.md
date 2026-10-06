@@ -48,6 +48,7 @@ classDiagram
         -item_type: str
         -attack_bonus: int
         -defense_bonus: int
+        -weapon_kind: str
         +to_dict() dict
         +from_dict(data) Item
     }
@@ -65,12 +66,16 @@ classDiagram
     class Hero {
         -hero_class: str
         -color: str
+        -mana: int
+        -max_mana: int
         -inventory: list
         -weapon: Item
         -armor: Item
         +add_item(item)
         +equip_item(index)
         +change_color(color)
+        +spend_mana(amount)
+        +restore_mana()
         +to_dict() dict
         +from_dict(data) Hero
     }
@@ -86,6 +91,7 @@ classDiagram
         -description: str
         +enemy: Enemy
         +item: Item
+        +drop: Item
         -is_final: bool
         +to_dict() dict
         +from_dict(data) Room
@@ -101,6 +107,10 @@ classDiagram
         +collect_item()
         +equip_item(index)
         +attack()
+        +melee_attack()
+        +cast_fire() int
+        +resolve_fire(spell_id)
+        +enemy_attack()
         +advance()
         +save_game()
         +load_game()
@@ -127,8 +137,12 @@ classDiagram
     class ExplorationWorld {
         -position: tuple
         -facing: str
+        -enemy_position: tuple
         +move(dx, dy, dt)
         +can_attack(snapshot) bool
+        +update_enemy(dt, alive) bool
+        +launch_fire(spell_id)
+        +update_projectiles(dt, alive)
         +to_dict() dict
         +restore(data, room_index) bool
     }
@@ -159,7 +173,7 @@ classDiagram
     VisualDataManager --> ExplorationWorld
 ```
 
-## Secuencia de una partida
+## Secuencia de una partida de consola
 
 ```mermaid
 sequenceDiagram
@@ -194,21 +208,28 @@ sequenceDiagram
 
 | Campo | Tipo | Regla |
 |---|---|---|
-| `version` | entero | Debe ser exactamente `1`. |
+| `version` | entero | Exporta `2`; acepta `1` mediante migración explícita. |
 | `status` | texto | `playing`, `victory` o `defeat`. |
 | `current_room` | entero | Índice existente dentro de `rooms`. |
 | `hero` | objeto | Incluye nombre, clase, vida, estadísticas, inventario y equipo. |
 | `rooms` | lista no vacía | Cada habitación incluye número, descripción, enemigo, objeto y `is_final`. |
 | `hero.color` | texto opcional | RGB hexadecimal `#RRGGBB`; si falta, usa el color de la clase. |
-| `view` | objeto opcional | Versión visual, índice de sala, posición y orientación. |
+| `hero.mana` / `hero.max_mana` | enteros | Mago: 0–100 / 100; Guerrero: 0 / 0. |
+| `weapon_kind` | texto | `sword` o `staff` para armas; `null` para armaduras. |
+| `rooms[].drop` | objeto opcional | Botín pendiente de un enemigo vivo; se mueve a `item` al morir. |
+| `view` | objeto opcional | Versión visual 2, sala, posiciones, orientación, ubicación de botín e intervalos restantes. |
 
 La lista debe contener un único jefe final vivo mientras la partida esté en curso. El jefe debe estar en la última habitación. Una victoria requiere al héroe vivo, ubicado en esa habitación, con el jefe derrotado.
 
 `DataManager` valida el contenedor JSON. `GameService` valida el significado del estado y reconstruye los modelos.
 
-La ampliación conserva `version: 1`: color y vista son adiciones compatibles. `VisualDataManager` agrega `view` en una copia del estado sin mutar el original. Una posición fuera de la sala, dentro de una columna o enemigo, no finita o perteneciente a otra habitación se descarta y el héroe vuelve a la entrada. Un color inválido sí invalida el dominio guardado y conserva intacta la partida actual.
+`GameService._migrate_state()` convierte una copia del guardado v1 a v2: inicializa maná por clase, identifica el bastón del Mago y mueve la armadura preexistente de un Goblin vivo a `drop`. No regenera objetos recogidos ni recompensa enemigos que ya estaban muertos. El guardado original no se modifica al cargar.
 
-## Flujo gráfico de un turno
+`VisualDataManager` agrega `view` sobre una copia sin mutar el dominio. `ExplorationWorld.restore()` acepta vistas v1 y v2. Posiciones no finitas, fuera de límites, dentro de rocas o solapadas con un enemigo vivo provocan restauración visual a las entradas. Los campos de dominio dañados rechazan la carga y conservan la partida activa.
+
+Los proyectiles son transitorios: `cast_fire()` consume 15 de maná y registra un identificador de impacto único. El mundo resuelve trayectoria/colisión y llama a `resolve_fire()` o `cancel_fire()`. Guardar, cargar o avanzar se bloquea mientras exista un hechizo pendiente; no se pierde un impacto al restaurar ni se duplica una recompensa.
+
+## Flujo gráfico en tiempo real
 
 ```mermaid
 sequenceDiagram
@@ -218,21 +239,32 @@ sequenceDiagram
     participant S as GameService
     J->>G: WASD / flechas
     G->>W: move(dirección, dt)
-    W-->>G: Posición limitada por paredes y columnas
+    W-->>G: Posición limitada por paredes y rocas
     J->>G: Espacio
     G->>W: can_attack(snapshot)
-    W-->>G: Enemigo cercano
-    G->>S: attack()
-    S-->>G: Ataque, contraataque y estado del encuentro
-    G->>G: Animar turno; bloquear ataques repetidos
+    W-->>G: Alcance y línea de visión válidos
+    alt Guerrero
+        G->>S: melee_attack()
+    else Mago
+        G->>S: cast_fire()
+        S-->>G: Identificador; maná consumido
+        G->>W: launch_fire(id)
+        W-->>G: Impacto o fallo
+        G->>S: resolve_fire(id) o cancel_fire(id)
+    end
+    G->>W: update_enemy(dt, alive)
+    W-->>G: Contacto cuando finaliza el intervalo de golpe
+    G->>S: enemy_attack()
     G-->>J: Vida, daño flotante y victoria/derrota
 ```
 
 ## Aislamiento por célula
 
-- **Dominio:** `Hero.color`, `change_color()` y `validate_color()`.
-- **Servicios:** catálogo de clases para la vista y caso de uso `change_hero_color()`.
-- **Interfaz/Integración:** renderizado, exploración, persistencia visual y arranque.
+- **Dominio:** apariencia, maná, identificación de armas y botín pendiente.
+- **Servicios:** ataques separados, autorización de fuego, recompensas y migración v1/v2.
+- **Interfaz/Integración:** cinematográfica, iluminación, navegación por cuadrícula, colisiones, proyectiles y persistencia visual.
 - **Integrador:** dependencias, documentación y pruebas cruzadas.
 
 La configuración local `.vscode/` y el entorno `.venv/` están excluidos de Git. Los cambios se encuentran en una rama local de funcionalidad; los prompts y evidencias se preparan para la revisión del equipo.
+
+`OpeningCinematic` avanza con tiempo de simulación: aparición de 1,5 s, lectura de 2 s, desaparición de 1,3 s y separación de 0,45 s por mensaje. La exploración permanece detenida durante la secuencia. La pausa detiene también proyectiles, persecución e intervalos. La iluminación se aplica a la escena de la cueva y a sus actores; el HUD y los textos permanecen legibles fuera de la máscara de luz.
