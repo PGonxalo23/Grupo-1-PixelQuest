@@ -1,5 +1,7 @@
 # Validación local de Pixel Quest 2D
 
+> Registro de la primera implementación 2D. Para la actualización basada en `flujo.docx`, consultar `ACTUALIZACION_CUEVA.md`: combate en tiempo real, cinematográfica y 91 pruebas aprobadas.
+
 ## Entorno comprobado por el agente
 
 - Windows, Python 3.12.10 y Pygame 2.6.1 dentro de `.venv`.

@@ -142,6 +142,8 @@ class MenuCLI:
         self._write("\nESTADO DEL HÉROE")
         self._write(f"Nombre: {hero['name']} · Clase: {class_name}")
         self._write(f"Vida: {hero['health']}/{hero['max_health']}")
+        if hero["hero_class"] == "mage":
+            self._write(f"Maná: {hero['mana']}/{hero['max_mana']}")
         self._write(
             f"Ataque base: {hero['base_attack']} · "
             f"Defensa base: {hero['base_defense']}"

@@ -15,7 +15,7 @@ from src.services.data_manager import DataManager
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Pixel Quest · RPG 2D con combate por turnos")
+    parser = argparse.ArgumentParser(description="Pixel Quest · Cueva 2D y combate en tiempo real")
     parser.add_argument("--cli", action="store_true", help="Ejecutar la interfaz de consola")
     parser.add_argument("--save-path", type=Path, default=PROJECT_ROOT / "data" / "savegame.json",
                         help="Ruta del guardado (por defecto: data/savegame.json del proyecto)")

@@ -10,12 +10,17 @@ RPG **visual 2D** desarrollado en Python y Pygame para la asignatura **Construcc
 - Pixel art original generado por código, sin descargas de imágenes ni recursos externos.
 - Vida, ataque y defensa encapsulados.
 - Inventario, armas, armaduras y equipamiento sin bonos acumulados por error.
-- Mazmorra determinista de tres habitaciones.
-- Combate por turnos contra un Goblin y un guardián final.
+- Cueva de tres salas con rocas, oscuridad e iluminación animada de antorchas.
+- Introducción cinematográfica: pantalla negra y tres mensajes que aparecen y desaparecen.
+- Restos del Guerrero o hechicero que entregan espada o bastón según la clase.
+- Combate gráfico en tiempo real, persecución de enemigos y daño por proximidad con intervalos.
+- Espada con alcance de dos alturas del personaje (144 píxeles lógicos).
+- Hechizo de fuego con impacto real, maná inicial 100 y costo de 15 por lanzamiento.
+- Recuperación de maná al matar enemigos; el Goblin deja una armadura al morir.
 - Animaciones de ataque, proyectiles del Mago, daño flotante y barras de vida.
 - Estados de victoria y derrota.
 - Guardado y carga de partidas en JSON.
-- Persistencia del color y posición; compatibilidad con partidas antiguas de consola.
+- Persistencia de color, maná, posiciones y estado del botín; migración de partidas v1 a v2.
 - Ventana redimensionable, inventario gráfico, pausa y pantallas de victoria/derrota.
 - Interfaz de consola con recuperación ante entradas inválidas.
 - Pruebas unitarias y de integración con `unittest`.
@@ -81,10 +86,15 @@ Los archivos `.vscode/` son configuración local y están excluidos de Git, seg�
 | Esc | Pausar, continuar o cerrar una pantalla secundaria. |
 | F5 | Guardar la partida explícitamente. |
 | F9 | Cargar el último guardado explícitamente. |
+| Enter durante la introducción | Omitir la secuencia cinematográfica. |
 
-El combate **es por turnos**: un ataque del héroe genera un contraataque si el enemigo sobrevive. Durante la animación no se puede ejecutar otro turno. Moverse, equiparse y personalizarse no consumen turnos de combate.
+El combate gráfico **es en tiempo real**: el Goblin y el guardián persiguen al héroe, rodean rocas y atacan al acercarse. Puedes moverte y esquivar mientras atacas. La espada tiene un intervalo de 0,55 s; el fuego, 0,75 s; el enemigo, 1,15 s entre golpes. No se añade un contraataque automático al daño por contacto.
 
-Ruta sugerida: recoge la espada en la primera sala con **E**, equípala con **I**, cruza la puerta derecha, derrota al Goblin, recoge y equipa la armadura y enfrenta al jefe final.
+El Mago empieza con **100 de maná** y consume **15 al lanzar fuego**, incluso si el proyectil falla. El maná solo se recupera al matar enemigos; los dos enemigos actuales lo restauran completamente. Con menos de 15 no se puede lanzar. Si agotas el maná antes de matar, carga un guardado anterior o comienza una nueva aventura.
+
+La pausa, el inventario y la personalización detienen persecución, proyectiles e intervalos. Guardar/cargar y salir al menú se bloquean mientras haya fuego en vuelo: reanuda primero la partida y espera el impacto o la desaparición del proyectil.
+
+Ruta sugerida: crea el personaje, observa la introducción o pulsa **Enter**, busca los restos de tu clase y recoge el arma con **E**. Equípala con **I**, cruza la salida derecha, derrota al Goblin, recoge la armadura de su cadáver y equípala antes de enfrentar al guardián.
 
 ### Consola y comprobación de arranque
 
@@ -94,6 +104,8 @@ Ruta sugerida: recoge la espada en la primera sala con **E**, equípala con **I*
 ```
 
 `--cli` también funciona con Python estándar sin Pygame. `--smoke-test` abre tres frames y termina sin crear una partida. Para usar un guardado alternativo: `--save-path "data/prueba.json"`.
+
+La consola conserva una adaptación por turnos para su demostración: usa los mismos modelos, maná y recompensas, sin simular persecución, posiciones ni proyectiles en vuelo.
 
 ## Menús de consola (`--cli`)
 
@@ -106,7 +118,7 @@ El menú principal permite:
 
 Durante la partida se puede consultar el estado, recoger y equipar objetos, atacar, avanzar y guardar.
 
-Ambas interfaces usan `data/savegame.json`, relativo al proyecto. Este archivo está excluido de Git. Un guardado realizado en consola conserva el color, pero omite la posición gráfica; al volver al modo 2D el héroe aparece en la entrada de su sala. No hay guardado automático al salir.
+Ambas interfaces usan `data/savegame.json`, relativo al proyecto. Este archivo está excluido de Git. Un guardado realizado en consola conserva color, maná y botín, pero omite la posición gráfica; al volver al modo 2D héroe y enemigo aparecen en sus ubicaciones iniciales de la sala. No hay guardado automático al salir.
 
 ## Ejecutar pruebas
 
@@ -130,7 +142,7 @@ La opción `-B` evita generar archivos `.pyc` durante la validación.
 
 Las pruebas gráficas usan SDL en modo `dummy` y recorren eventos reales de teclado y ratón, colisiones, ambas clases hasta la victoria, derrota, pausa, colores y persistencia. Si Pygame no está instalado se omiten explícitamente; ejecuta la suite con `.venv` para comprobar todo.
 
-Resultado local de esta implementación: **72 pruebas aprobadas**. El arranque también se comprobó con el controlador real de ventanas de Windows. La evaluación manual del estudiante sigue pendiente en [`PRUEBAS_LOCALES.md`](PRUEBAS_LOCALES.md).
+Resultado local de la actualización de `flujo.docx`: **91 pruebas aprobadas**. Incluyen introducción, maná, migración v1, botín único, contacto a distintos FPS, navegación y proyectiles contra rocas. También se comprobó el arranque con el controlador real de ventanas de Windows y se revisaron capturas gráficas. Las pruebas manuales de esta actualización están en [`ACTUALIZACION_CUEVA.md`](ACTUALIZACION_CUEVA.md); `PRUEBAS_LOCALES.md` conserva el registro de la implementación anterior.
 
 ## Arquitectura
 
@@ -144,7 +156,7 @@ El código sigue una arquitectura en tres capas:
 
 `src/main.py` únicamente construye las dependencias y arranca la aplicación. Los diagramas Mermaid están en [`architecture.md`](architecture.md).
 
-La vista gráfica se reparte en `graphical_interface.py` (pantallas y eventos), `pixel_art.py` (gráficos), `world.py` (exploración) y `visual_persistence.py` (metadatos de posición). El dominio y el servicio de combate no importan Pygame.
+La vista gráfica se reparte en `graphical_interface.py` (pantallas y eventos), `cinematic.py` (secuencia narrativa), `pixel_art.py` (gráficos e iluminación), `world.py` (exploración, navegación y proyectiles) y `visual_persistence.py` (metadatos de posición). El dominio y el servicio de combate no importan Pygame.
 
 ## Estructura
 
@@ -169,6 +181,7 @@ pixel-quest/
 |   `-- ui/
 |       |-- __init__.py
 |       |-- cli_interface.py
+|       |-- cinematic.py
 |       |-- graphical_interface.py
 |       |-- pixel_art.py
 |       |-- world.py
@@ -180,6 +193,7 @@ pixel-quest/
 |   |-- test_services.py
 |   |-- test_integration.py
 |   |-- test_visual_state.py
+|   |-- test_cave_combat.py
 |   `-- test_graphical.py
 |-- .gitignore
 |-- architecture.md
@@ -187,6 +201,7 @@ pixel-quest/
 |-- JUGAR.bat
 |-- PRUEBAS_LOCALES.md
 |-- COMMIT_PROPUESTO.md
+|-- ACTUALIZACION_CUEVA.md
 `-- README.md
 ```
 
@@ -235,8 +250,8 @@ Los prompts de esta ampliación y el mensaje de commit propuesto están en [`COM
 
 ## Limitaciones del MVP
 
-- Una mazmorra de tres habitaciones.
+- Una cueva de tres salas.
 - Dos clases de héroe.
-- Combate por turnos, sin combate en tiempo real.
+- Sin regeneración pasiva de maná ni pociones.
 - Sin multijugador, tienda, economía ni conexión a internet.
 - Un único archivo local de guardado.

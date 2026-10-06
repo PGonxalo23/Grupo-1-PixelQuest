@@ -1,4 +1,4 @@
-"""RPG 2D de exploración con combate por turnos, conectado a GameService."""
+"""RPG 2D cinematográfico con combate en tiempo real y reglas en GameService."""
 
 import math
 from collections import deque
@@ -9,6 +9,7 @@ import pygame
 from src.domain.exceptions import DomainError
 from src.services.app_service import ApplicationError
 from src.ui import pixel_art as art
+from src.ui.cinematic import OpeningCinematic
 
 
 @dataclass
@@ -21,7 +22,6 @@ class Button:
 class GraphicalGame:
     WIDTH, HEIGHT = 1280, 800
     MAP_ORIGIN = (32, 140)
-    TURN_DURATION = 0.85
 
     def __init__(self, service, world, visual_data_manager, window_size=(1152, 720)):
         pygame.display.init()
@@ -35,8 +35,10 @@ class GraphicalGame:
         self.screen = "menu"
         self.running = True
         self.time = 0.0
-        self.turn_remaining = 0.0
-        self.combat = None
+        self.intro = None
+        self.paused_from = "playing"
+        self.swing_remaining = 0.0
+        self.hit_effects = []
         self.buttons = []
         self.fonts = {}
         self.messages = deque(maxlen=30)
@@ -154,7 +156,8 @@ class GraphicalGame:
             self.window = pygame.display.set_mode((max(640, event.w), max(400, event.h)),
                                                   pygame.RESIZABLE)
             return
-        if event.type == pygame.WINDOWFOCUSLOST and self.screen == "playing":
+        if event.type == pygame.WINDOWFOCUSLOST and self.screen in ("playing", "intro"):
+            self.paused_from = self.screen
             self.screen = "pause"
             return
         if event.type == pygame.TEXTINPUT and self.screen == "create" and self.name_focused:
@@ -174,6 +177,12 @@ class GraphicalGame:
             self._handle_key(event.key)
 
     def _handle_key(self, key):
+        if self.screen == "intro":
+            if key == pygame.K_RETURN:
+                self._finish_intro()
+            elif key == pygame.K_ESCAPE:
+                self.handle_action("pause")
+            return
         if self.screen == "create":
             if key == pygame.K_BACKSPACE and self.name_focused:
                 self.name = self.name[:-1]
@@ -184,7 +193,7 @@ class GraphicalGame:
             return
         if key == pygame.K_ESCAPE:
             if self.screen == "playing":
-                self.screen = "pause"
+                self.handle_action("pause")
             elif self.screen in ("pause", "inventory", "appearance"):
                 self.handle_action("resume")
             elif self.screen == "ending":
@@ -221,6 +230,9 @@ class GraphicalGame:
             self.name_focused = True
             pygame.key.start_text_input()
         elif action == "menu":
+            if self.world.projectiles:
+                self.notify("Reanuda la partida y espera a que termine el fuego.")
+                return
             self.screen = "menu"
             pygame.key.stop_text_input()
         elif action.startswith("class:"):
@@ -230,30 +242,30 @@ class GraphicalGame:
         elif action == "start":
             self.start_game()
         elif action == "load":
-            if self.turn_remaining > 0:
-                self.notify("Espera a que termine la animación del turno.")
+            if self.world.projectiles:
+                self.notify("Espera a que termine el proyectil de fuego.")
                 return
             messages = self.service.load_game()
             self.data_manager.restore_view(self.service.get_snapshot())
-            self.turn_remaining, self.combat = 0.0, None
+            self.swing_remaining, self.hit_effects, self.intro = 0.0, [], None
             self.messages.clear()
             self.record(messages)
             self.screen = "playing" if self.service.status == "playing" else "ending"
             self.notify(messages[-1])
         elif action == "resume":
-            self.screen = "playing" if self.service.status == "playing" or self.turn_remaining > 0 else "ending"
+            self.screen = ("intro" if self.intro and not self.intro.finished else
+                           "playing" if self.service.status == "playing" else "ending")
         elif action == "pause":
+            self.paused_from = self.screen
             self.screen = "pause"
         elif action == "save":
-            if self.turn_remaining > 0:
-                self.notify("Espera a que termine la animación del turno.")
+            if self.world.projectiles or (self.intro and not self.intro.finished):
+                self.notify("Termina la introducción o espera a que se resuelva el fuego.")
                 return
             messages = self.service.save_game()
             self.record(messages)
             self.notify(messages[-1])
         elif action in ("inventory", "appearance"):
-            if self.turn_remaining > 0:
-                return
             self.screen = action
             self.selected_color = self.service.get_snapshot()["hero"]["color"]
         elif action == "apply_color":
@@ -265,7 +277,7 @@ class GraphicalGame:
             self.record(self.service.equip_item(int(action.split(":")[1])))
             self.notify("Objeto equipado. Tus estadísticas se actualizaron.")
         elif action in ("attack", "interact"):
-            if self.turn_remaining > 0 or self.service.status != "playing":
+            if self.screen != "playing" or self.service.status != "playing":
                 return
             snapshot = self.service.get_snapshot()
             if action == "interact":
@@ -276,8 +288,12 @@ class GraphicalGame:
                 self.record(self.service.collect_item())
                 self.notify("Objeto recogido. Pulsa I para equiparlo.")
             elif action == "advance":
+                if snapshot["hero"]["weapon"] is None:
+                    self.notify("Recoge el arma de los restos y equípala con I antes de avanzar.")
+                    return
                 self.record(self.service.advance())
                 self.world.enter_room(self.service.get_snapshot()["current_room_index"])
+                self.hit_effects, self.swing_remaining = [], 0.0
             else:
                 self.notify("Acércate a un objeto, enemigo o puerta y pulsa E.")
 
@@ -286,37 +302,72 @@ class GraphicalGame:
         self.world.enter_room(0)
         self.messages.clear()
         self.record(messages)
-        self.combat, self.turn_remaining = None, 0.0
-        self.screen = "playing"
+        self.swing_remaining, self.hit_effects = 0.0, []
+        self.intro = OpeningCinematic()
+        self.screen = "intro"
+        self.notification_remaining = 0
         pygame.key.stop_text_input()
-        self.notify("Recoge la espada con E y equípala con I antes de avanzar.")
+
+    def _finish_intro(self):
+        self.intro.skip()
+        self.screen = "playing"
+        self.notify("Busca los restos del caído. E recoge el arma; I permite equiparla.")
 
     def attack(self):
-        before = self.service.get_snapshot()
-        if not self.world.can_attack(before):
-            self.notify("Acércate al enemigo para atacar. Usa WASD o las flechas.")
+        if self.world.hero_cooldown > 0:
             return
-        self.record(self.service.attack())
+        before = self.service.get_snapshot()
+        if not before["hero"]["weapon"]:
+            self.notify("Debes recoger y equipar tu arma desde el inventario.")
+            return
+        if not self.world.can_attack(before):
+            self.notify("Enemigo fuera de alcance o detrás de una roca.")
+            return
+        if before["hero"]["hero_class"] == "mage":
+            spell_id = self.service.cast_fire()
+            self.world.launch_fire(spell_id)
+            self.record(["Lanzaste fuego. −15 de maná."])
+        else:
+            self.record(self.service.melee_attack())
+            self.world.hero_cooldown = self.world.SWORD_INTERVAL
+            self.swing_remaining = 0.28
+            self._enemy_hit(before)
+
+    def _enemy_hit(self, before):
         after = self.service.get_snapshot()
-        self.combat = {"before": before, "after": after,
-                       "enemy_damage": before["room"]["enemy"]["health"] - after["room"]["enemy"]["health"],
-                       "hero_damage": before["hero"]["health"] - after["hero"]["health"]}
-        self.turn_remaining = self.TURN_DURATION
+        damage = before["room"]["enemy"]["health"] - after["room"]["enemy"]["health"]
+        self.hit_effects.append({"target": "enemy", "damage": damage, "age": 0.0,
+                                 "position": self.world.enemy_position})
+        if after["room"]["enemy"]["health"] == 0:
+            self.world.mark_enemy_defeated()
+            if after["room"]["item"]:
+                self.notify("El Goblin dejó una armadura. Recógela con E y equípala con I.")
+
+    def _clear_projectiles(self):
+        for projectile in self.world.projectiles:
+            self.service.cancel_fire(projectile.spell_id)
+        self.world.projectiles.clear()
 
     def update(self, dt, movement=None):
+        dt = max(0, min(dt, 0.1))
         self.time += dt
         self.notification_remaining = max(0, self.notification_remaining - dt)
+        if self.screen == "intro":
+            self.intro.update(dt)
+            if self.intro.finished:
+                self._finish_intro()
+            return
         if self.screen != "playing":
             return
-        self.turn_remaining = max(0, self.turn_remaining - dt)
-        if self.turn_remaining == 0:
-            self.combat = None
-            if self.service.status in ("victory", "defeat"):
-                self.screen = "ending"
-                return
-        if self.turn_remaining > 0:
-            self.world.walking = False
+        if self.service.status != "playing":
+            self._clear_projectiles()
+            self.screen = "ending"
             return
+        self.swing_remaining = max(0, self.swing_remaining - dt)
+        for effect in self.hit_effects:
+            effect["age"] += dt
+        self.hit_effects = [e for e in self.hit_effects if e["age"] < 0.8]
+        self.world.tick_cooldowns(dt)
         if movement is None:
             keys = pygame.key.get_pressed()
             movement = (int(keys[pygame.K_d] or keys[pygame.K_RIGHT]) -
@@ -324,7 +375,32 @@ class GraphicalGame:
                         int(keys[pygame.K_s] or keys[pygame.K_DOWN]) -
                         int(keys[pygame.K_w] or keys[pygame.K_UP]))
         enemy = self.service.get_snapshot()["room"].get("enemy")
-        self.world.move(*movement, dt, enemy_alive=bool(enemy and enemy["health"] > 0))
+        alive = bool(enemy and enemy["health"] > 0)
+        self.world.move(*movement, dt, enemy_alive=alive)
+        hits, misses = self.world.update_projectiles(dt, alive)
+        for spell_id in misses:
+            self.service.cancel_fire(spell_id)
+        for spell_id in hits:
+            before = self.service.get_snapshot()
+            if self.service.status != "playing" or before["room"]["enemy"]["health"] <= 0:
+                self.service.cancel_fire(spell_id)
+                continue
+            self.record(self.service.resolve_fire(spell_id))
+            self._enemy_hit(before)
+        snapshot = self.service.get_snapshot()
+        enemy = snapshot["room"].get("enemy")
+        alive = bool(enemy and enemy["health"] > 0)
+        if self.world.update_enemy(dt, alive) and self.service.status == "playing":
+            health = snapshot["hero"]["health"]
+            self.record(self.service.enemy_attack())
+            damage = health - self.service.get_snapshot()["hero"]["health"]
+            self.hit_effects.append({"target": "hero", "damage": damage, "age": 0.0,
+                                     "position": self.world.position})
+        if not alive:
+            self._clear_projectiles()
+        if self.service.status != "playing":
+            self._clear_projectiles()
+            self.screen = "ending"
 
     def render(self):
         self.canvas.fill(art.BG)
@@ -333,6 +409,8 @@ class GraphicalGame:
             self._draw_menu()
         elif self.screen == "create":
             self._draw_creation()
+        elif self.screen == "intro":
+            self._draw_intro()
         else:
             self._draw_game()
             if self.screen in ("pause", "inventory", "appearance", "ending"):
@@ -342,7 +420,7 @@ class GraphicalGame:
                 self.buttons = []
                 {"pause": self._draw_pause, "inventory": self._draw_inventory,
                  "appearance": self._draw_appearance, "ending": self._draw_ending}[self.screen]()
-        if self.notification_remaining > 0:
+        if self.notification_remaining > 0 and self.screen != "intro":
             self.panel((180, 738, 920, 43), border=art.GOLD)
             self.text(self.notification, (640, 759), 17, art.GOLD,
                       center=True, max_width=888)
@@ -352,14 +430,14 @@ class GraphicalGame:
         self.text("GRUPO 1 / CONSTRUCCIÓN DE SOFTWARE", (86, 87), 17, art.MINT)
         self.text("PIXEL", (80, 156), 87, heading=True)
         self.text("QUEST", (80, 244), 87, art.MINT, heading=True)
-        self.wrapped("Una mazmorra. Dos caminos. Tu propia aventura.",
+        self.wrapped("Una cueva. Una pérdida. Tu venganza.",
                      (88, 363), 490, 23, art.MUTED)
         self.button("Nueva aventura     →", (88, 457, 442, 58), "create", primary=True)
         self.button("Cargar partida", (88, 529, 214, 50), "load")
         self.button("Continuar", (316, 529, 214, 50), "resume",
                     enabled=self.service.status != "not_started")
         self.button("Salir", (88, 594, 442, 46), "quit")
-        self.text("EXPLORA · EQUIPA · COMBATE POR TURNOS", (88, 700), 16, art.MUTED)
+        self.text("EXPLORA · EQUIPA · SOBREVIVE", (88, 700), 16, art.MUTED)
         preview = pygame.transform.scale(art.room_background(2), (470, 262))
         self.canvas.blit(preview, (755, 314))
         art.draw_actor(self.canvas, art.hero_sprite("warrior", "#59C9A5", equipped=True, scale=7),
@@ -367,6 +445,14 @@ class GraphicalGame:
         art.draw_actor(self.canvas, art.enemy_sprite(True), (1110, 498), math.sin(self.time * 2 + 1) * 3)
         self.text("EL GUARDIÁN TE ESPERA", (986, 624), 20, art.GOLD, center=True)
         self.text("2D / PIXEL ART / PARTIDA LOCAL", (986, 662), 15, art.MUTED, center=True)
+
+    def _draw_intro(self):
+        self.canvas.fill((0, 0, 0))
+        image = self._font(42, True).render(self.intro.message, True, (255, 255, 255))
+        image.set_alpha(self.intro.alpha)
+        self.canvas.blit(image, image.get_rect(center=(640, 385)))
+        self.text("ENTER · Omitir     ESC · Pausar", (640, 746), 14,
+                  (91, 91, 91), center=True)
 
     def _draw_creation(self):
         self.text("01 / CREA TU HÉROE", (132, 82), 18, art.MINT)
@@ -419,7 +505,7 @@ class GraphicalGame:
         snapshot = self.service.get_snapshot()
         hero, room = snapshot["hero"], snapshot["room"]
         self.text("PIXEL QUEST", (32, 21), 27, heading=True)
-        self.text("LA MAZMORRA DEL GUARDIÁN", (33, 61), 15, art.MUTED)
+        self.text("LA CUEVA DE LOS GOBLINS", (33, 61), 15, art.MUTED)
         for index in range(snapshot["total_rooms"]):
             x = 506 + index * 83
             current = index == snapshot["current_room_index"]
@@ -427,7 +513,7 @@ class GraphicalGame:
             self.text(str(index + 1), (x, 51), 17, art.BG if current else art.TEXT, center=True)
             if index < snapshot["total_rooms"] - 1:
                 pygame.draw.line(self.canvas, art.BORDER, (x + 23, 51), (x + 60, 51), 2)
-        self.button("Guardar [F5]", (835, 27, 176, 44), "save", enabled=self.turn_remaining == 0)
+        self.button("Guardar [F5]", (835, 27, 176, 44), "save", enabled=not self.world.projectiles)
         self.button("Pausa [Esc]", (1027, 27, 221, 44), "pause")
         self.text(f"{snapshot['current_room_index'] + 1:02} / {room['description']}",
                   (32, 104), 18, art.GOLD)
@@ -449,49 +535,75 @@ class GraphicalGame:
         enemy_alive = bool(enemy and enemy["health"] > 0)
         unlocked = not enemy_alive
         door = pygame.Rect(792, 194, 49, 92)
-        pygame.draw.rect(image, (14, 21, 31), door)
-        pygame.draw.rect(image, art.MINT if unlocked else art.RED, door, 3)
+        pygame.draw.ellipse(image, (13, 18, 23), door.inflate(14, 12))
+        pygame.draw.ellipse(image, art.MINT if unlocked else art.RED, door, 2)
         if not unlocked:
             for x in range(door.x + 8, door.right - 2, 10):
                 pygame.draw.line(image, (125, 119, 126), (x, door.y + 3), (x, door.bottom - 3), 3)
         else:
             pygame.draw.polygon(image, art.MINT, [(810, 224), (823, 240), (810, 256)])
-        self.canvas.blit(image, self.MAP_ORIGIN)
-        elapsed = self.TURN_DURATION - self.turn_remaining if self.combat else 0
-        visual = snapshot
-        if self.combat and elapsed < 0.23:
-            visual = self.combat["before"]
-        v_enemy = visual["room"].get("enemy")
-        hero_position = (ox + world.position[0], oy + world.position[1])
-        enemy_position = (ox + world.ENEMY[0], oy + world.ENEMY[1])
+        if world.room_index == 0:
+            remains = art.remains_sprite(hero["hero_class"])
+            image.blit(remains, remains.get_rect(center=world.ITEM))
         if room.get("item"):
-            ix, iy = world.ITEM
-            pygame.draw.ellipse(self.canvas, (22, 29, 38), (ox + ix - 24, oy + iy - 3, 48, 14))
-            sprite = art.item_sprite(room["item"]["item_type"])
-            self.canvas.blit(sprite, sprite.get_rect(midbottom=(ox + ix, oy + iy - 7 + math.sin(self.time * 3) * 4)))
-            self.text(room["item"]["name"], (ox + ix, oy + iy + 28), 15, art.GOLD, center=True)
-        if enemy:
-            art.draw_actor(self.canvas, art.enemy_sprite(enemy["is_boss"]), enemy_position,
-                           math.sin(self.time * 3) * 2,
-                           flash=bool(self.combat and 0.23 <= elapsed <= 0.4),
-                           dead=v_enemy["health"] == 0)
-            self.text(enemy["name"], (enemy_position[0], enemy_position[1] - 123),
-                      16, art.RED if enemy_alive else art.MUTED, center=True)
-            self._health_bar(enemy_position[0] - 47, enemy_position[1] - 98, 94,
-                             v_enemy["health"], v_enemy["max_health"], art.RED, 7)
+            ix, iy = world.item_position
+            item = room["item"]
+            sprite = art.item_sprite(item["item_type"], item.get("weapon_kind"))
+            image.blit(sprite, sprite.get_rect(midbottom=(ix + (38 if world.room_index == 0 else 0),
+                                                          iy - 6 + math.sin(self.time * 3) * 3)))
+        if enemy_alive and world.distance_to(world.enemy_position) <= world.CONTACT_RANGE + 15:
+            pygame.draw.circle(image, art.RED, tuple(map(int, world.enemy_position)),
+                               world.CONTACT_RANGE, 2)
         sprite = art.hero_sprite(hero["hero_class"], hero["color"], world.facing,
                                  bool(hero.get("weapon")), bool(hero.get("armor")))
         bob = math.sin(self.time * (16 if world.walking else 3)) * (3 if world.walking else 1)
-        direction = 1 if enemy_position[0] >= hero_position[0] else -1
-        lunge = direction * math.sin(min(1, elapsed / 0.4) * math.pi) * 18 if self.combat else 0
-        art.draw_actor(self.canvas, sprite, (hero_position[0] + lunge, hero_position[1]), bob,
-                       flash=bool(self.combat and self.combat["hero_damage"] and 0.5 < elapsed < 0.68),
-                       dead=bool(hero["health"] == 0 and self.turn_remaining == 0))
+        hero_flash = any(e["target"] == "hero" and e["age"] < 0.18 for e in self.hit_effects)
+        enemy_flash = any(e["target"] == "enemy" and e["age"] < 0.18 for e in self.hit_effects)
+        actors = [(world.position[1], sprite, world.position, bob, hero_flash, hero["health"] == 0)]
+        if enemy:
+            actors.append((world.enemy_position[1], art.enemy_sprite(enemy["is_boss"]),
+                           world.enemy_position, math.sin(self.time * 3) * 2,
+                           enemy_flash, not enemy_alive))
+        for _, actor, position, bounce, flash, dead in sorted(actors, key=lambda a: a[0]):
+            art.draw_actor(image, actor, position, bounce, flash=flash, dead=dead)
+        for projectile in world.projectiles:
+            x, y = map(int, projectile.position)
+            for distance in (18, 12, 6):
+                tx = x - projectile.velocity[0] / world.FIRE_SPEED * distance
+                ty = y - 35 - projectile.velocity[1] / world.FIRE_SPEED * distance
+                pygame.draw.circle(image, (190, 76, 38), (int(tx), int(ty)), 5)
+            pygame.draw.circle(image, (237, 113, 43), (x, y - 35), 12)
+            pygame.draw.circle(image, (255, 198, 91), (x, y - 35), 8)
+            pygame.draw.circle(image, (255, 241, 189), (x, y - 35), 4)
+        if self.swing_remaining > 0:
+            hx, hy = world.position
+            ex, ey = world.enemy_position
+            angle = math.atan2(-(ey - hy), ex - hx)
+            radius = world.ATTACK_RANGE
+            pygame.draw.arc(image, art.GOLD, (hx - radius, hy - 35 - radius,
+                                             radius * 2, radius * 2), angle - 0.55, angle + 0.55, 5)
+        art.illuminate(image, self.time, world.position, world.projectiles)
+        self.canvas.blit(image, self.MAP_ORIGIN)
+        hero_position = (ox + world.position[0], oy + world.position[1])
+        enemy_position = (ox + world.enemy_position[0], oy + world.enemy_position[1])
+        if room.get("item"):
+            ix, iy = world.item_position
+            label = "Restos del hechicero" if hero["hero_class"] == "mage" else "Restos del guerrero"
+            self.text(label if world.room_index == 0 else room["item"]["name"],
+                      (ox + ix, oy + iy + 37), 15, art.GOLD, center=True)
+        if enemy:
+            self.text(enemy["name"], (enemy_position[0], enemy_position[1] - 123),
+                      16, art.RED if enemy_alive else art.MUTED, center=True)
+            self._health_bar(enemy_position[0] - 47, enemy_position[1] - 98, 94,
+                             enemy["health"], enemy["max_health"], art.RED, 7)
         self.text(hero["name"], (hero_position[0], hero_position[1] - 88), 14,
                   art.TEXT, center=True, max_width=165)
-        if self.combat:
-            self._draw_combat_effects(hero_position, enemy_position, elapsed, hero["hero_class"])
-        if snapshot["status"] == "playing" and not self.combat:
+        for effect in self.hit_effects:
+            px, py = effect["position"]
+            self.text(f"−{effect['damage']}", (ox + px, oy + py - 110 - effect["age"] * 35),
+                      27, art.GOLD if effect["target"] == "enemy" else art.RED,
+                      heading=True, center=True)
+        if snapshot["status"] == "playing":
             action = world.context_action(snapshot)
             prompts = {"attack": "ESPACIO / E · Atacar", "collect": "E · Recoger objeto",
                        "advance": "E · Salir" if unlocked else "Puerta bloqueada: derrota al enemigo"}
@@ -501,29 +613,6 @@ class GraphicalGame:
                       center=True, max_width=470)
         pygame.draw.rect(self.canvas, art.BORDER, (ox, oy, world.WIDTH, world.HEIGHT), 2)
 
-    def _draw_combat_effects(self, hero_position, enemy_position, elapsed, hero_class):
-        if elapsed < 0.4:
-            t = min(1, elapsed / 0.24)
-            if hero_class == "mage":
-                x = hero_position[0] + (enemy_position[0] - hero_position[0]) * t
-                y = hero_position[1] - 38 + (enemy_position[1] - hero_position[1]) * t
-                pygame.draw.circle(self.canvas, (61, 127, 134), (int(x), int(y)), 15)
-                pygame.draw.circle(self.canvas, art.MINT, (int(x), int(y)), 9)
-                pygame.draw.circle(self.canvas, art.TEXT, (int(x), int(y)), 4)
-            else:
-                rect = pygame.Rect(enemy_position[0] - 43, enemy_position[1] - 76, 80, 68)
-                pygame.draw.arc(self.canvas, art.GOLD, rect, -0.6, 1.9, 7)
-        if elapsed >= 0.23:
-            self.text(f"−{self.combat['enemy_damage']}",
-                      (enemy_position[0], enemy_position[1] - 142 - (elapsed - 0.23) * 30),
-                      28, art.GOLD, heading=True, center=True)
-        if elapsed >= 0.48 and self.combat["hero_damage"]:
-            self.text(f"−{self.combat['hero_damage']}",
-                      (hero_position[0], hero_position[1] - 108 - (elapsed - 0.48) * 30),
-                      26, art.RED, heading=True, center=True)
-        self.text("TU ATAQUE" if elapsed < 0.45 else "RESPUESTA ENEMIGA" if self.combat["hero_damage"] else "ENEMIGO DERROTADO",
-                  (464, 170), 16, art.GOLD, center=True)
-
     def _draw_sidebar(self, snapshot):
         hero, room = snapshot["hero"], snapshot["room"]
         self.panel((920, 140, 328, 616))
@@ -532,34 +621,44 @@ class GraphicalGame:
         self.text("GUERRERO" if hero["hero_class"] == "warrior" else "MAGO", (943, 225), 14, art.MUTED)
         self.text(f"VIDA  {hero['health']} / {hero['max_health']}", (943, 263), 17)
         self._health_bar(943, 292, 280, hero["health"], hero["max_health"])
+        if hero["hero_class"] == "mage":
+            self.text(f"MANÁ  {hero['mana']} / {hero['max_mana']}", (943, 313), 16, art.BLUE)
+            self._health_bar(943, 340, 280, hero["mana"], hero["max_mana"], art.BLUE, 8)
+        else:
+            self.text(f"ESPADA · ALCANCE {self.world.ATTACK_RANGE}px", (943, 325), 15, art.MUTED)
         attack = hero["base_attack"] + (hero["weapon"]["attack_bonus"] if hero["weapon"] else 0)
         defense = hero["base_defense"] + (hero["armor"]["defense_bonus"] if hero["armor"] else 0)
-        self.text(f"ATQ {attack:02}        DEF {defense:02}", (943, 321), 21, art.GOLD)
-        pygame.draw.line(self.canvas, art.BORDER, (943, 360), (1226, 360))
-        self.text("EQUIPAMIENTO", (943, 380), 14, art.MUTED)
+        self.text(f"ATQ {attack:02}        DEF {defense:02}", (943, 368), 21, art.GOLD)
+        pygame.draw.line(self.canvas, art.BORDER, (943, 402), (1226, 402))
+        self.text("EQUIPAMIENTO", (943, 415), 14, art.MUTED)
         self.text("Arma: " + (hero["weapon"]["name"] if hero["weapon"] else "Sin equipar"),
-                  (943, 409), 16, max_width=280)
+                  (943, 442), 16, max_width=280)
         self.text("Armadura: " + (hero["armor"]["name"] if hero["armor"] else "Sin equipar"),
-                  (943, 438), 16, max_width=280)
-        self.button("Inventario [I]", (943, 478, 280, 43), "inventory", enabled=self.turn_remaining == 0)
-        self.button("Cambiar color [C]", (943, 533, 280, 43), "appearance", enabled=self.turn_remaining == 0)
-        can_attack = self.world.can_attack(snapshot) and self.turn_remaining == 0
-        self.button("Atacar [ESPACIO]", (943, 588, 280, 48), "attack", enabled=can_attack, primary=True)
+                  (943, 468), 16, max_width=280)
+        self.button("Inventario [I]", (943, 507, 280, 40), "inventory")
+        self.button("Cambiar color [C]", (943, 557, 280, 40), "appearance")
+        can_attack = self.world.can_attack(snapshot) and self.world.hero_cooldown == 0
+        if hero["hero_class"] == "mage" and hero["mana"] < 15:
+            can_attack = False
+        self.button("Fuego · 15 maná" if hero["hero_class"] == "mage" else "Atacar [ESPACIO]",
+                    (943, 607, 280, 45), "attack", enabled=can_attack, primary=True)
         enemy = room.get("enemy")
-        goal = ("Derrota al guardián final." if room["is_final"] else "Derrota al Goblin y recoge la armadura.") if enemy and enemy["health"] > 0 else "Recoge y equipa el objeto; luego busca la puerta."
+        goal = ("Derrota al guardián final." if room["is_final"] else "Esquiva al Goblin y recoge su armadura al vencerlo.") if enemy and enemy["health"] > 0 else "Recoge el arma de los restos y equípala con I." if self.world.room_index == 0 else "Recoge el botín y busca la salida."
         if snapshot["status"] != "playing":
             goal = "Aventura completada." if snapshot["status"] == "victory" else "Tu héroe ha caído."
-        self.text("OBJETIVO", (943, 660), 13, art.MINT)
-        self.wrapped(goal, (943, 685), 276, 15, max_lines=2)
+        if hero["hero_class"] == "mage" and hero["mana"] < 15 and enemy and enemy["health"] > 0:
+            goal = "Sin maná: carga un guardado anterior o inicia otra aventura."
+        self.text("OBJETIVO", (943, 674), 13, art.MINT)
+        self.wrapped(goal, (943, 699), 276, 15, max_lines=2)
 
     def _draw_pause(self):
         self.panel((414, 178, 452, 456))
         self.text("UN RESPIRO", (640, 225), 32, heading=True, center=True)
         self.text("La aventura te espera.", (640, 270), 18, art.MUTED, center=True)
         self.button("Continuar", (458, 318, 364, 50), "resume", primary=True)
-        self.button("Guardar partida", (458, 382, 364, 48), "save", enabled=self.turn_remaining == 0)
-        self.button("Cargar último guardado", (458, 444, 364, 48), "load", enabled=self.turn_remaining == 0)
-        self.button("Menú principal", (458, 506, 364, 48), "menu", enabled=self.turn_remaining == 0)
+        self.button("Guardar partida", (458, 382, 364, 48), "save", enabled=not self.world.projectiles and not (self.intro and not self.intro.finished))
+        self.button("Cargar último guardado", (458, 444, 364, 48), "load", enabled=not self.world.projectiles)
+        self.button("Menú principal", (458, 506, 364, 48), "menu", enabled=not self.world.projectiles)
         self.text("F5 guarda · F9 carga · Esc continúa", (640, 593), 14, art.MUTED, center=True)
 
     def _draw_inventory(self):
@@ -569,12 +668,12 @@ class GraphicalGame:
         self.text("Equipar reemplaza el objeto del mismo tipo; los bonos no se acumulan.",
                   (296, 245), 15, art.MUTED, max_width=688)
         if not hero["inventory"]:
-            self.text("Aún no tienes objetos. Explora y recoge la espada con E.", (640, 390),
+            self.text("Explora los restos del caído y recoge tu arma con E.", (640, 390),
                       19, art.MUTED, center=True)
         for index, item in enumerate(hero["inventory"]):
             y = 290 + index * 102
             self.panel((296, y, 688, 88), color=(13, 23, 35))
-            self.canvas.blit(art.item_sprite(item["item_type"]), (315, y + 19))
+            self.canvas.blit(art.item_sprite(item["item_type"], item.get("weapon_kind")), (315, y + 19))
             self.text(item["name"], (387, y + 17), 22, heading=True)
             bonus = f"+{item['attack_bonus']} ataque" if item["item_type"] == "weapon" else f"+{item['defense_bonus']} defensa"
             self.text(bonus, (387, y + 52), 16, art.MINT)
@@ -600,7 +699,7 @@ class GraphicalGame:
     def _draw_ending(self):
         victory = self.service.status == "victory"
         self.panel((328, 177, 624, 456), border=art.MINT if victory else art.RED)
-        self.text("MAZMORRA COMPLETADA" if victory else "EL HÉROE HA CAÍDO",
+        self.text("LA CUEVA HA SIDO LIBERADA" if victory else "EL HÉROE HA CAÍDO",
                   (640, 219), 16, art.MINT if victory else art.RED, center=True)
         self.text("¡VICTORIA!" if victory else "DERROTA", (640, 285), 58,
                   art.MINT if victory else art.RED, heading=True, center=True)

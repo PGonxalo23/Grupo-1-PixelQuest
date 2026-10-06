@@ -64,6 +64,8 @@ class ExplorationTests(unittest.TestCase):
     def test_enemy_collision_and_range(self):
         service = GameService(None)
         service.start_new_game("Ada", "warrior")
+        service.collect_item()
+        service.equip_item(0)
         service.advance()
         world = ExplorationWorld()
         world.enter_room(1)
@@ -117,7 +119,10 @@ class VisualPersistenceTests(unittest.TestCase):
             service.start_new_game("Ada", "warrior")
             service.advance()
             state = service.export_state()
+            state["version"] = 1
             del state["hero"]["color"]
+            del state["hero"]["mana"]
+            del state["hero"]["max_mana"]
             data.save(state)
             world = ExplorationWorld()
             adapter = VisualDataManager(data, world)

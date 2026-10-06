@@ -6,7 +6,7 @@ from copy import deepcopy
 class VisualDataManager:
     """Implementa el mismo contrato de persistencia utilizado por GameService.
 
-    El dominio conserva su JSON v1. Los clientes de consola pueden ignorar `view`.
+    El dominio usa JSON v2 y migra v1. La consola puede ignorar `view`.
     La vista se restaura únicamente después de que el servicio acepte la partida.
     """
 

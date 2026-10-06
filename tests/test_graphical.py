@@ -57,6 +57,8 @@ class GraphicalIntegrationTests(unittest.TestCase):
         self.click(f"class:{hero_class}")
         self.click("color:#E86E75")
         self.key(pygame.K_RETURN)
+        self.assertEqual("intro", self.app.screen)
+        self.key(pygame.K_RETURN)
         self.assertEqual("playing", self.app.screen)
         self.assertEqual("#E86E75", self.service.get_snapshot()["hero"]["color"])
 
@@ -75,6 +77,13 @@ class GraphicalIntegrationTests(unittest.TestCase):
             self.app.update(0.05, (0, 0))
             self.app.render()
 
+    def approach_enemy(self):
+        for _ in range(160):
+            if self.world.can_attack(self.service.get_snapshot()):
+                return
+            self.app.update(0.025, (1, 0))
+        self.fail("El enemigo no entró en el alcance del héroe.")
+
     def test_complete_graphical_game_with_keyboard_and_mouse(self):
         self.complete_game("warrior")
 
@@ -91,11 +100,14 @@ class GraphicalIntegrationTests(unittest.TestCase):
         self.walk_to((768, 240))
         self.key(pygame.K_e)
         self.assertEqual(1, self.world.room_index)
-        self.walk_to((500, 240))
-        while self.service.get_snapshot()["room"]["enemy"]["health"] > 0:
+        self.approach_enemy()
+        for _ in range(8):
+            if self.service.get_snapshot()["room"]["enemy"]["health"] <= 0:
+                break
             self.key(pygame.K_SPACE)
             self.finish_turn()
-        self.walk_to(self.world.ITEM)
+        self.assertEqual(0, self.service.current_room["enemy"]["health"])
+        self.walk_to(self.world.item_position)
         self.key(pygame.K_e)
         self.key(pygame.K_i)
         self.click("equip:1")
@@ -103,8 +115,10 @@ class GraphicalIntegrationTests(unittest.TestCase):
         self.walk_to((768, 240))
         self.key(pygame.K_e)
         self.assertEqual(2, self.world.room_index)
-        self.walk_to((500, 240))
-        while self.service.status == "playing":
+        self.approach_enemy()
+        for _ in range(8):
+            if self.service.status != "playing":
+                break
             self.click("attack")
             self.finish_turn()
         self.assertEqual("victory", self.service.status)
@@ -115,8 +129,10 @@ class GraphicalIntegrationTests(unittest.TestCase):
         self.click("load")
         self.assertEqual("ending", self.app.screen)
 
-    def test_attack_cannot_happen_remotely_or_repeat_during_animation(self):
+    def test_sword_range_and_cooldown_do_not_block_movement(self):
         self.create_hero()
+        self.service.collect_item()
+        self.service.equip_item(0)
         state = self.service.export_state()
         state["current_room"] = 1
         self.service.restore_state(state)
@@ -124,29 +140,28 @@ class GraphicalIntegrationTests(unittest.TestCase):
         before = self.service.export_state()
         self.key(pygame.K_SPACE)
         self.assertEqual(before, self.service.export_state())
-        self.walk_to((500, 240))
+        self.approach_enemy()
         self.key(pygame.K_SPACE)
         after_attack = self.service.export_state()
         self.key(pygame.K_SPACE)
         self.assertEqual(after_attack, self.service.export_state())
         position = self.world.position
-        self.app.update(0.05, (1, 0))
-        self.assertEqual(position, self.world.position)
+        self.app.update(0.05, (0, 1))
+        self.assertNotEqual(position, self.world.position)
 
-    def test_defeat_is_shown_after_counterattack(self):
+    def test_defeat_is_shown_from_enemy_contact_without_player_attack(self):
         self.create_hero()
         state = self.service.export_state()
         state["current_room"] = 2
         state["hero"]["health"] = 1
         self.data.save(state)
         self.key(pygame.K_F9)
-        self.walk_to((500, 240))
-        self.key(pygame.K_SPACE)
-        self.assertEqual("defeat", self.service.status)
         self.key(pygame.K_ESCAPE)
         self.click("resume")
         self.assertEqual("playing", self.app.screen)
-        self.finish_turn()
+        for _ in range(130):
+            self.app.update(0.05, (0, 0))
+        self.assertEqual("defeat", self.service.status)
         self.assertEqual("ending", self.app.screen)
         self.assertEqual(0, self.service.get_snapshot()["hero"]["health"])
         self.click("save")
@@ -180,6 +195,49 @@ class GraphicalIntegrationTests(unittest.TestCase):
         self.assertIn("UTF-8", self.app.notification)
         self.key(pygame.K_F5)
         self.assertEqual(expected["hero"], self.data.load()["hero"])
+
+    def test_cinematic_freezes_world_can_pause_and_ends_naturally(self):
+        self.click("create")
+        self.app.process_event(pygame.event.Event(pygame.TEXTINPUT, text="Ada"))
+        self.key(pygame.K_RETURN)
+        self.assertEqual("intro", self.app.screen)
+        self.key(pygame.K_e)
+        self.key(pygame.K_SPACE)
+        self.app.update(0.1, (1, 0))
+        self.assertEqual(self.world.SPAWN, self.world.position)
+        self.assertEqual([], self.service.get_snapshot()["hero"]["inventory"])
+        self.key(pygame.K_ESCAPE)
+        elapsed = self.app.intro.elapsed
+        self.app.update(0.1, (1, 0))
+        self.assertEqual(elapsed, self.app.intro.elapsed)
+        self.click("resume")
+        for _ in range(160):
+            self.app.update(0.1, (0, 0))
+        self.assertEqual("playing", self.app.screen)
+        self.app.render()
+
+    def test_mana_projectile_and_pursuit_freeze_in_pause(self):
+        self.create_hero("mage")
+        self.service.collect_item()
+        self.service.equip_item(0)
+        self.service.advance()
+        self.world.enter_room(1)
+        self.approach_enemy()
+        self.key(pygame.K_SPACE)
+        self.assertEqual(85, self.service.get_snapshot()["hero"]["mana"])
+        self.assertEqual(12, self.service.current_room["enemy"]["health"])
+        projectile = self.world.projectiles[0].position
+        enemy = self.world.enemy_position
+        self.key(pygame.K_ESCAPE)
+        for _ in range(20):
+            self.app.update(0.05, (1, 0))
+        self.assertEqual(projectile, self.world.projectiles[0].position)
+        self.assertEqual(enemy, self.world.enemy_position)
+        self.click("resume")
+        self.finish_turn()
+        self.assertEqual(100, self.service.get_snapshot()["hero"]["mana"])
+        self.assertEqual(0, self.service.current_room["enemy"]["health"])
+        self.assertEqual("Armadura", self.service.current_room["item"]["name"])
 
     def test_resized_window_keeps_clicks_and_all_screens_renderable(self):
         self.app.process_event(pygame.event.Event(pygame.VIDEORESIZE, w=900, h=640))

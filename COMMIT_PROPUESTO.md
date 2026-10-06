@@ -1,5 +1,25 @@
 # Commit propuesto — pendiente de validación humana
 
+## Actualización de flujo.docx — propuesta actual
+
+```text
+feat: incorporar cueva cinematográfica y combate en tiempo real
+
+- Agregar introducción narrativa con fundidos y restos por clase.
+- Incorporar espada de alcance extendido y bastón con fuego y maná.
+- Implementar persecución, daño por contacto y botín tras la muerte.
+- Ambientar la cueva con rocas e iluminación de antorchas.
+- Migrar guardados v1 a v2 y conservar la adaptación CLI.
+- Verificar 91 pruebas y actualizar documentación.
+
+Validación humana: [completar tras probar en VS Code].
+```
+
+Rama local: `feature/cave-cinematic-combat`, desde `342cc50`.
+La actualización no se ha confirmado ni publicado. Prompt y requisitos: `ACTUALIZACION_CUEVA.md`.
+
+## Registro de la implementación anterior
+
 Este documento es una propuesta de mensaje. No se ha creado el commit ni se ha publicado la rama.
 
 ## Mensaje
